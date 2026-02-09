@@ -1,0 +1,107 @@
+/*
+{
+    "parser": "babel-eslint",
+    "env": {
+        "browser": true,
+        "es6": true
+    },
+    "extends": [
+        "airbnb", 
+        "airbnb/hooks", 
+        "prettier"
+    ],
+    "globals": {
+        "Atomics": "readonly",
+        "SharedArrayBuffer": "readonly"
+    },
+    "parserOptions": {
+        "ecmaFeatures": {
+            "jsx": true,
+            "modules": true
+        },
+        "ecmaVersion": 2019,
+        "sourceType": "module"
+    },
+    "plugins": [
+        "react",
+        "prettier",
+        "jsx-a11y"
+    ],
+    "rules": {
+        "no-unused-vars":"warn",
+        "no-console":"warn",
+        "no-extra-semi": "off",
+        "no-unexpected-multiline": "off",
+        "func-names":"off",
+        "no-shadow": "off",
+        "import/no-unresolved":"off",
+        "react/jsx-max-props-per-line": [ 1, { "maximum": 1, "when": "multiline" }],
+        "react/jsx-filename-extension": [ 1, { "extensions": [".js", ".jsx"] } ],
+        "no-param-reassign": ["error", 
+            { 
+                "props": true, 
+                "ignorePropertyModificationsFor": ["draft"] 
+            }
+        ],
+        "prettier/prettier":["error", {
+            "singleQuote": true,
+            "semi": false,
+            "endOfLine": "auto",
+            "bracketSpacing": true,
+            "proseWrap": "never"
+        }]
+    }
+}
+*/
+{
+    "extends": [
+        "airbnb",
+        "plugin:prettier/recommended",
+        "plugin:react/recommended",
+        "plugin:react-hooks/recommended",
+        "plugin:jsx-a11y/recommended"
+    ],
+    "plugins": [
+        "prettier",
+        "react"
+    ],
+    "rules": {
+        "prettier/prettier":["error", {
+            "singleQuote": true,
+            "semi": false,
+            "endOfLine": "auto",
+            "bracketSpacing": true
+        }],
+        "no-unused-vars":"warn",
+        "no-console":"warn",
+        "no-extra-semi": "off",
+        "no-unexpected-multiline": "off",
+        "func-names":"off",
+        "no-shadow": "off",
+        "import/no-unresolved":"off",
+        // "react/jsx-max-props-per-line": [ 1, { "maximum": 1, "when": "multiline" }],
+        "react/jsx-filename-extension": [ 1, { "extensions": [".js", ".jsx"] } ],
+        "no-param-reassign": ["error", 
+            { 
+                "props": true, 
+                "ignorePropertyModificationsFor": ["draft"] 
+            }
+        ]
+        /*
+        "react/jsx-filename-extension":         [1, { "extensions": [".js", ".jsx"] }],
+        "react/jsx-indent":                     [2, 4],
+        "react/jsx-indent-props":               [2, 4],
+        "react/jsx-one-expression-per-line":    [0],
+        "react/prefer-stateless-function":      [1],
+        "react/static-property-placement":      [1, "property assignment"],
+        "react-hooks/rules-of-hooks":           "error",
+        "react-hooks/exhaustive-deps":          "warn"
+        */
+    },
+    "parser": "babel-eslint",
+    "parserOptions": {
+        "ecmaFeatures": {
+            "jsx": true
+        }
+    }
+}
