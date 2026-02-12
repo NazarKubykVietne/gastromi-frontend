@@ -1,17 +1,18 @@
 /* eslint-disable prettier/prettier */
 // eslint-disable-next-line prettier/prettier
 
-import React, { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
-import { Room, RoomEvent } from 'livekit-client';
+import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router";
+import { Room, RoomEvent } from "livekit-client";
+import { useScribe } from "@elevenlabs/react";
 
-import getDeviceType from 'utils/window/getDeviceType';
-import enterFullscreen from 'utils/window/enterFullscreen';
-import MainLogo from 'components/MainLogo';
-import Button from 'ui/buttons/Button';
-import SecondsTimer from 'ui/timer/SecondsTimer';
-import OverlayText from './OverlayText';
-import ControlButtons from './ControlButtons';
+import getDeviceType from "utils/window/getDeviceType";
+import enterFullscreen from "utils/window/enterFullscreen";
+import MainLogo from "components/MainLogo";
+import Button from "ui/buttons/Button";
+import SecondsTimer from "ui/timer/SecondsTimer";
+import OverlayText from "./OverlayText";
+import ControlButtons from "./ControlButtons";
 import {
   VideoBlock,
   VideoContent,
@@ -21,21 +22,22 @@ import {
   MicButton,
   ButtonsContent,
   ControlsContainer,
-} from './styles';
+} from "./styles";
 
 export default function AvatarSession() {
   const _ = React;
   const navigate = useNavigate();
-  const onClose = () => {
-    navigate('/');
-  };
+  const onClose = () => navigate("/");
+
   const containerRef = useRef(null);
   const videoRef = useRef(null);
 
   const roomRef = useRef(null);
   const mediaStreamRef = useRef(null);
-  const liveSessionIdRef = useRef('');
+
+  const liveSessionIdRef = useRef("");
   const startingRef = useRef(false);
+
   const avatarTalking = useRef(null);
   const currentQuestionIdRef = useRef(null);
 
@@ -45,13 +47,181 @@ export default function AvatarSession() {
   const pcRef = useRef(null);
   const dcRef = useRef(null);
   const sttStreamRef = useRef(null);
-  const partialRef = useRef('');
+  const partialRef = useRef("");
 
-  const [ready, setReady] = useState(false); // готовы стартовать (эндпоинты/клиент)
-  const [running, setRunning] = useState(false); // livekit сессия подключена
+  // Scribe refs
+  const scribeActiveRef = useRef(false);
+  const lastCommittedRef = useRef("");
+  const pendingUtteranceRef = useRef(null);
+
+  const [ready, setReady] = useState(false);
+  const [running, setRunning] = useState(false);
   const [inProgress, setProgress] = useState(false);
+
   const [voiceMode, setVoiceMode] = useState(false);
+
+  // Avatar overlay text (AI)
   const [overText, setOverText] = useState(null);
+
+  // User STT text (shown on screen)
+  const [userPartialText, setUserPartialText] = useState("");
+  const [userFinalText, setUserFinalText] = useState("");
+
+  function showOverText(text) {
+    setOverText(text);
+  }
+
+  const unlockAudio = async () => {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      if (ctx.state === "suspended") await ctx.resume();
+      ctx.close?.();
+    } catch {}
+  };
+
+  const attachLiveKitVideo = (room) => {
+    const mediaStream = new MediaStream();
+    mediaStreamRef.current = mediaStream;
+
+    room.on(RoomEvent.TrackSubscribed, (track) => {
+      if (!track?.mediaStreamTrack) return;
+
+      mediaStream.addTrack(track.mediaStreamTrack);
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+        videoRef.current.play().catch(() => {});
+      }
+    });
+  };
+
+  const sendUserTextToBackend = async (text) => {
+    const sessionId = liveSessionIdRef.current;
+
+    if (!sessionId) {
+      console.warn("[STT] no sessionId yet -> queue send", text);
+      pendingUtteranceRef.current = text;
+      return;
+    }
+
+    if (!text) return;
+
+    if (avatarTalking.current) {
+      console.log("[STT] avatarTalking=true -> skip send", text);
+      return;
+    }
+
+    const payload = {
+      sessionId,
+      text,
+      ...(currentQuestionIdRef.current != null
+        ? { currentQuestionId: currentQuestionIdRef.current }
+        : {}),
+    };
+
+    console.log("[STT] POST /api/live/speak", payload);
+
+    const resp = await fetch("/api/live/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).catch(() => null);
+
+    const data = await resp?.json().catch(() => ({}));
+    console.log("[STT] /api/live/speak response:", resp?.status, data);
+
+    if (data?.currentQuestionId === null) {
+      currentQuestionIdRef.current = null;
+    } else if (data?.currentQuestionId != null) {
+      currentQuestionIdRef.current = data.currentQuestionId;
+    }
+
+    if (data?.avatar_text) showOverText(data.avatar_text);
+
+    if (overTextTimeoutRef.current) {
+      clearTimeout(overTextTimeoutRef.current);
+      overTextTimeoutRef.current = null;
+    }
+  };
+
+  const flushPendingIfAny = async () => {
+    const pending = pendingUtteranceRef.current;
+    if (!pending) return;
+    pendingUtteranceRef.current = null;
+    console.log("[STT] flushing pending utterance:", pending);
+    await sendUserTextToBackend(pending);
+  };
+
+  // === token for Scribe (ElevenLabs STT) ===
+  async function fetchScribeToken() {
+    console.log("[STT] fetchScribeToken -> GET /api/scribe-token");
+    const r = await fetch("/api/scribe-token", { method: "GET" });
+
+    const raw = await r.text().catch(() => "");
+    let j = {};
+    try {
+      j = JSON.parse(raw);
+    } catch {}
+
+    if (!r.ok) {
+      console.error("[STT] scribe-token failed:", r.status, raw);
+      throw new Error(j?.error || raw || `Scribe token failed (${r.status})`);
+    }
+
+    if (!j?.token) {
+      console.error("[STT] scribe-token missing token. raw:", raw);
+      throw new Error("Scribe token missing { token }");
+    }
+
+    console.log("[STT] scribe-token ok");
+    return j.token;
+  }
+
+  // Keep this function for parity (was used only for OpenAI STT earlier)
+  // async function fetchEphemeralToken() {
+  //   const r = await fetch("/api/live/realtime-token", { method: "POST" });
+  //   const j = await r.json().catch(() => ({}));
+  //   if (!r.ok)
+  //     throw new Error(j?.error || `Token endpoint failed (${r.status})`);
+  //   if (!j.token) throw new Error("Token response missing { token }");
+  //   return j.token;
+  // }
+
+  const scribe = useScribe({
+    modelId: "scribe_v2_realtime",
+
+    onPartialTranscript: (data) => {
+      if (!scribeActiveRef.current) return;
+
+      const text = (data?.text || "").trim();
+      if (!text) return;
+
+      setUserPartialText(text);
+      console.log("[STT][partial]", text);
+    },
+
+    onCommittedTranscript: async (data) => {
+      if (!scribeActiveRef.current) return;
+
+      const text = (data?.text || "").trim();
+      if (!text) return;
+
+      if (lastCommittedRef.current === text) return;
+      lastCommittedRef.current = text;
+
+      setUserFinalText(text);
+      setUserPartialText("");
+      console.log("[STT][committed]", text);
+
+      await sendUserTextToBackend(text);
+    },
+
+    onError: (e) => {
+      console.error("[STT][scribe error]", e);
+    },
+  });
 
   useEffect(() => {
     setReady(true);
@@ -80,9 +250,10 @@ export default function AvatarSession() {
         } catch {}
       }
       mediaStreamRef.current = null;
-      liveSessionIdRef.current = '';
+
+      liveSessionIdRef.current = "";
+      pendingUtteranceRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -92,8 +263,8 @@ export default function AvatarSession() {
     const onData = (payload) => {
       try {
         const msg = JSON.parse(new TextDecoder().decode(payload));
-        if (msg.type === 'avatar_start_talking') avatarTalking.current = true;
-        if (msg.type === 'avatar_stop_talking') avatarTalking.current = false;
+        if (msg.type === "avatar_start_talking") avatarTalking.current = true;
+        if (msg.type === "avatar_stop_talking") avatarTalking.current = false;
       } catch {}
     };
 
@@ -101,43 +272,16 @@ export default function AvatarSession() {
     return () => room.off(RoomEvent.DataReceived, onData);
   }, [running]);
 
-  const unlockAudio = async () => {
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      const ctx = new AC();
-      if (ctx.state === 'suspended') await ctx.resume();
-      ctx.close?.();
-    } catch {}
-  };
-
-  const attachLiveKitVideo = (room) => {
-    const mediaStream = new MediaStream();
-    mediaStreamRef.current = mediaStream;
-
-    room.on(RoomEvent.TrackSubscribed, (track) => {
-      if (!track?.mediaStreamTrack) return;
-
-      mediaStream.addTrack(track.mediaStreamTrack);
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        videoRef.current.play().catch(() => {});
-      }
-    });
-  };
-
-  function showOverText(text) {
-    setOverText(text);
-
-    // if (overTextTimeoutRef.current) clearTimeout(overTextTimeoutRef.current)
-    // overTextTimeoutRef.current = setTimeout(() => setOverText(null), 8000)
-  }
-
   const startVoiceChat = async () => {
-    if (voiceMode) return;
+    if (voiceMode) {
+      console.log("[STT] startVoiceChat: already enabled -> skip");
+      return;
+    }
+
+    console.log("[STT] startVoiceChat: init");
+
     try {
-      // попросим разрешение на микрофон
+      console.log("[STT] requesting microphone permission (preflight)...");
       await navigator.mediaDevices
         .getUserMedia({
           audio: {
@@ -147,194 +291,94 @@ export default function AvatarSession() {
           },
         })
         .then((ms) => {
+          console.log(
+            "[STT] mic permission granted (preflight). stopping tracks...",
+          );
           ms.getTracks().forEach((t) => t.stop());
         })
-        .catch(() => {});
+        .catch((e) => {
+          console.warn(
+            "[STT] mic preflight failed/denied (continuing anyway):",
+            e,
+          );
+        });
 
-      const token = await fetchEphemeralToken();
+      const token = await fetchScribeToken();
+      console.log(
+        "[STT] got Scribe token:",
+        token ? `${String(token).slice(0, 6)}...` : token,
+      );
 
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
+      scribeActiveRef.current = true;
+      lastCommittedRef.current = "";
+      setUserPartialText("");
+      setUserFinalText("");
+      partialRef.current = "";
+      try {
+        dcRef.current?.close?.();
+      } catch {}
+      dcRef.current = null;
 
-      const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
-      sttStreamRef.current = ms;
-      pc.addTrack(ms.getTracks()[0]);
+      try {
+        pcRef.current?.close?.();
+      } catch {}
+      pcRef.current = null;
 
-      const dc = pc.createDataChannel('oai-events');
-      dcRef.current = dc;
-
-      partialRef.current = '';
-
-      dc.addEventListener('message', async (e) => {
-        let evt;
+      if (sttStreamRef.current) {
         try {
-          evt = JSON.parse(e.data);
-        } catch {
-          return;
-        }
-
-        const delta = evt?.delta || evt?.transcript_delta || evt?.transcription?.delta;
-
-        const completed =
-          evt?.type === 'conversation.item.input_audio_transcription.completed' ||
-          evt?.type === 'input_audio_transcription.completed' ||
-          evt?.type === 'transcription.completed';
-
-        const isDelta =
-          evt?.type === 'conversation.item.input_audio_transcription.delta' ||
-          evt?.type === 'input_audio_transcription.delta' ||
-          evt?.type === 'transcription.delta';
-
-        if (isDelta && delta) {
-          partialRef.current += delta;
-          return;
-        }
-
-        if (completed) {
-          const text = (evt?.transcript || partialRef.current).trim();
-
-          partialRef.current = '';
-
-          if (text && !avatarTalking.current) {
-            const sessionId = liveSessionIdRef.current;
-            if (!sessionId) return;
-
-            const payload = {
-              sessionId,
-              text,
-              ...(currentQuestionIdRef.current != null ? { currentQuestionId: currentQuestionIdRef.current } : {}),
-            };
-
-            const resp = await fetch('/api/live/speak', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload),
-            }).catch(() => null);
-
-            const data = await resp?.json().catch(() => ({}));
-
-            if (data?.currentQuestionId === null) {
-              currentQuestionIdRef.current = null;
-            } else if (data?.currentQuestionId != null) {
-              currentQuestionIdRef.current = data.currentQuestionId;
-            }
-
-            if (data?.avatar_text) {
-              showOverText(data.avatar_text);
-            }
-          }
-
-          if (overTextTimeoutRef.current) {
-            clearTimeout(overTextTimeoutRef.current);
-            overTextTimeoutRef.current = null;
-          }
-          return;
-        }
-
-        if (evt?.type === 'error') {
-          console.error(evt?.error?.message || 'Realtime error');
-          stopVoiceChat().catch(() => {});
-        }
-      });
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      const sdpResp = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        body: offer.sdp,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/sdp',
-        },
-      });
-
-      if (!sdpResp.ok) {
-        const t = await sdpResp.text().catch(() => '');
-        throw new Error(`SDP exchange failed (${sdpResp.status}): ${t}`);
+          sttStreamRef.current.getTracks().forEach((t) => t.stop());
+        } catch {}
       }
+      sttStreamRef.current = null;
 
-      const answer = { type: 'answer', sdp: await sdpResp.text() };
-      await pc.setRemoteDescription(answer);
+      console.log("[STT] connecting Scribe (VAD commit) ...");
 
-      if (getDeviceType() === 'android') {
+      await scribe.connect({
+        token,
+        microphone: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+
+        commitStrategy: "vad",
+        vadSilenceThresholdSecs: 1.2,
+        vadThreshold: 0.4,
+        minSpeechDurationMs: 120,
+        minSilenceDurationMs: 200,
+      });
+
+      console.log("[STT] Scribe connected  speak now");
+      setVoiceMode(true);
+
+      if (getDeviceType() === "android") {
+        console.log("[STT] android detected -> entering fullscreen");
         const vRef = videoRef.current || null;
         enterFullscreen(containerRef.current, vRef);
       }
-
-      setVoiceMode(true);
     } catch (e) {
-      console.error(e);
+      console.error("[STT] startVoiceChat failed:", e);
       await stopVoiceChat().catch(() => {});
     }
   };
 
-  const startSession = async () => {
-    if (startingRef.current) return;
-    startingRef.current = true;
-    try {
-      setProgress(true);
-      await unlockAudio();
-      await startVoiceChat();
-
-      if (getDeviceType() === 'android') {
-        const vRef = videoRef.current || null;
-        enterFullscreen(containerRef.current, vRef);
-      }
-
-      if (videoRef.current) videoRef.current.muted = false;
-
-      const resp = await fetch('/api/live/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(data?.error || `Start failed (${resp.status})`);
-
-      liveSessionIdRef.current = data.sessionId;
-
-      const room = new Room();
-      roomRef.current = room;
-      attachLiveKitVideo(room);
-
-      await room.connect(data.livekitUrl, data.livekitToken);
-
-      setRunning(true);
-      setProgress(false);
-
-      const respAction = await fetch('/api/live/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'started',
-          sessionId: data.sessionId,
-        }),
-      }).catch(() => {});
-
-      const dataAction = await respAction?.json().catch(() => ({}));
-
-      if (dataAction?.avatar_text) {
-        showOverText(dataAction.avatar_text);
-      }
-    } catch (e) {
-      console.error(e);
-      setProgress(false);
-    } finally {
-      startingRef.current = false;
-    }
-  };
-
-  async function fetchEphemeralToken() {
-    const r = await fetch('/api/live/realtime-token', { method: 'POST' });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j?.error || `Token endpoint failed (${r.status})`);
-    if (!j.token) throw new Error('Token response missing { token }');
-    return j.token;
-  }
-
   const stopVoiceChat = async () => {
+    console.log("[STT] stopVoiceChat");
+
     setVoiceMode(false);
+    scribeActiveRef.current = false;
+    lastCommittedRef.current = "";
+    pendingUtteranceRef.current = null;
+
+    setUserPartialText("");
+    setUserFinalText("");
+
+    try {
+      await scribe.disconnect?.();
+      console.log("[STT] scribe disconnected");
+    } catch (e) {
+      console.warn("[STT] scribe disconnect failed:", e);
+    }
 
     try {
       dcRef.current?.close?.();
@@ -353,28 +397,139 @@ export default function AvatarSession() {
     }
     sttStreamRef.current = null;
 
-    partialRef.current = '';
+    partialRef.current = "";
     currentQuestionIdRef.current = null;
   };
 
-  const handleClose = () => {
-    onClose();
+  const startSession = async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+
+    try {
+      setProgress(true);
+      await unlockAudio();
+
+      await startVoiceChat();
+
+      if (getDeviceType() === "android") {
+        const vRef = videoRef.current || null;
+        enterFullscreen(containerRef.current, vRef);
+      }
+
+      if (videoRef.current) videoRef.current.muted = false;
+
+      const resp = await fetch("/api/live/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok)
+        throw new Error(data?.error || `Start failed (${resp.status})`);
+
+      liveSessionIdRef.current = data.sessionId;
+
+      const room = new Room();
+      roomRef.current = room;
+      attachLiveKitVideo(room);
+
+      await room.connect(data.livekitUrl, data.livekitToken);
+
+      setRunning(true);
+      setProgress(false);
+
+      await flushPendingIfAny();
+
+      const respAction = await fetch("/api/live/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "started",
+          sessionId: data.sessionId,
+        }),
+      }).catch(() => {});
+
+      const dataAction = await respAction?.json().catch(() => ({}));
+      if (dataAction?.avatar_text) showOverText(dataAction.avatar_text);
+    } catch (e) {
+      console.error(e);
+      setProgress(false);
+    } finally {
+      startingRef.current = false;
+    }
   };
 
-  const btnTitle = !ready ? 'Gandrīz gatavs' : 'Sākt sesiju';
+  const handleClose = () => onClose();
+
+  const btnTitle = !ready ? "Gandrīz gatavs" : "Sākt sesiju";
 
   return (
     <VideoBlock ref={containerRef}>
       <VideoContent>
         <VideoEl ref={videoRef} autoPlay playsInline muted />
+
         {running ? (
           <>
             <VideoTimer>
               <SecondsTimer isWhite />
             </VideoTimer>
+
             <MicButton>
               <div>
-                {overText ? <OverlayText text={overText} maxLineLength={100} /> : null}
+                {overText ? (
+                  <OverlayText text={overText} maxLineLength={100} />
+                ) : null}
+
+                {/* USER STT text */}
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    background: "#fff",
+                    borderRadius: 12,
+                    color: "#111",
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+                    maxWidth: 720,
+                    width: "min(720px, calc(100vw - 24px))",
+                    zIndex: 9999,
+                  }}
+                >
+                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 6 }}>
+                    tu teici:
+                  </div>
+
+                  {userPartialText ? (
+                    <div
+                      style={{
+                        fontSize: 16,
+                        opacity: 0.8,
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {userPartialText}
+                    </div>
+                  ) : null}
+
+                  {userFinalText ? (
+                    <div
+                      style={{
+                        marginTop: userPartialText ? 6 : 0,
+                        fontSize: 16,
+                        fontWeight: 700,
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {userFinalText}
+                    </div>
+                  ) : null}
+
+                  {!userPartialText && !userFinalText ? (
+                    <div style={{ fontSize: 14, opacity: 0.6 }}>
+                      (nekas vēl nav teikts)
+                    </div>
+                  ) : null}
+                </div>
+
                 <ControlsContainer>
                   <ControlButtons
                     onClose={handleClose}
@@ -385,6 +540,7 @@ export default function AvatarSession() {
                 </ControlsContainer>
               </div>
             </MicButton>
+
             <LogoBlock>
               <MainLogo />
             </LogoBlock>
