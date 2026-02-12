@@ -292,21 +292,21 @@ export default function AvatarSession() {
         })
         .then((ms) => {
           console.log(
-            "[STT] mic permission granted (preflight). stopping tracks...",
+            "[STT] mic permission granted (preflight). stopping tracks..."
           );
           ms.getTracks().forEach((t) => t.stop());
         })
         .catch((e) => {
           console.warn(
             "[STT] mic preflight failed/denied (continuing anyway):",
-            e,
+            e
           );
         });
 
       const token = await fetchScribeToken();
       console.log(
         "[STT] got Scribe token:",
-        token ? `${String(token).slice(0, 6)}...` : token,
+        token ? `${String(token).slice(0, 6)}...` : token
       );
 
       scribeActiveRef.current = true;
@@ -335,6 +335,7 @@ export default function AvatarSession() {
 
       await scribe.connect({
         token,
+        languageCode: "lav",
         microphone: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -344,6 +345,7 @@ export default function AvatarSession() {
         commitStrategy: "vad",
         vadSilenceThresholdSecs: 1.2,
         vadThreshold: 0.4,
+
         minSpeechDurationMs: 120,
         minSilenceDurationMs: 200,
       });
